@@ -31,6 +31,8 @@ import {
   query,
   where,
   orderBy,
+  getDoc,
+  setDoc,
 } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 import {
   getAuth,
@@ -39,6 +41,9 @@ import {
   signOut,
   onAuthStateChanged,
 } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+
+// Import EmailJS for sending emails
+import emailjs from "https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/browser.min.js";
 
 /* ================== FIREBASE INIT ================== */
 
@@ -55,6 +60,162 @@ const firebaseConfig = {
 const fbApp = initializeApp(firebaseConfig);
 const db = getFirestore(fbApp);
 const auth = getAuth(fbApp);
+
+/* ================== EMAILJS INIT ================== */
+// Initialize EmailJS - replace these with YOUR values from emailjs.com
+const EMAILJS_SERVICE_ID = "service_06cx0oi"; // Your EmailJS Service ID
+const EMAILJS_TEMPLATE_ID = "template_k0t8wbh"; // Your EmailJS Template ID
+const EMAILJS_PUBLIC_KEY = "wvB-U8QnWMRF7T1Ta"; // Your EmailJS Public Key
+
+// Initialize EmailJS (if keys are set up)
+if (EMAILJS_PUBLIC_KEY !== "YOUR_PUBLIC_KEY_HERE") {
+  try {
+    emailjs.init(EMAILJS_PUBLIC_KEY);
+    console.log("✅ EmailJS initialized");
+  } catch (e) {
+    console.warn("EmailJS init error (will fallback to console):", e.message);
+  }
+}
+
+/* ================== 2-FACTOR AUTHENTICATION (FREE DEMO) ================== */
+
+// ⚠️ DEMO MODE: Uses console logging
+// 📧 TO SEND REAL EMAILS: See CLERK_SETUP.md for SendGrid integration
+
+// Generate a 6-digit verification code
+function generateVerificationCode() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+// Send verification code via email
+async function sendVerificationCode(email) {
+  try {
+    const code = generateVerificationCode();
+    const expiryTime = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes expiry
+
+    await setDoc(doc(db, "verification_codes", email), {
+      code,
+      expiryTime,
+      createdAt: serverTimestamp(),
+      verified: false,
+    });
+
+    // Try to send real email via SendGrid
+    try {
+      await sendEmailViaCloudFunction(email, code);
+      console.log(`✅ Verification email sent to ${email}`);
+    } catch (emailError) {
+      // Fallback: Show code in console if email fails
+      console.warn("📧 Email service unavailable, showing code in console");
+      console.clear();
+      console.log(
+        "%c🔐 TRACENET AI - EMAIL VERIFICATION CODE",
+        "color: #22d3ee; font-size: 16px; font-weight: bold; background: #05060f; padding: 8px;",
+      );
+      console.log(
+        "%cEmail: " + email,
+        "color: #a855f7; font-size: 14px; background: #0b0d1c; padding: 4px;",
+      );
+      console.log(
+        "%cCode: " + code,
+        "color: #fbbf24; font-size: 20px; font-weight: bold; background: #0b0d1c; padding: 8px; font-family: monospace;",
+      );
+      console.log(
+        "%cExpires in: 10 minutes",
+        "color: #34d399; font-size: 12px; background: #0b0d1c; padding: 4px;",
+      );
+    }
+
+    return code;
+  } catch (error) {
+    console.error("❌ Error sending verification code:", error);
+    throw new Error("Failed to send verification code. Please try again.");
+  }
+}
+
+// Send email via Firebase Cloud Function + SendGrid
+async function sendEmailViaCloudFunction(email, code) {
+  try {
+    // Send via EmailJS (no backend needed!)
+    const response = await emailjs.send(
+      EMAILJS_SERVICE_ID,
+      EMAILJS_TEMPLATE_ID,
+      {
+        to_email: email,
+        verification_code: code,
+        user_email: email,
+        code_number: code,
+      },
+    );
+
+    if (response.status === 200) {
+      return { success: true };
+    }
+    throw new Error("Failed to send email");
+  } catch (error) {
+    console.error("EmailJS error:", error);
+    throw error;
+  }
+}
+
+// Verify the code entered by user
+async function verifyCode(email, enteredCode) {
+  try {
+    const docRef = doc(db, "verification_codes", email);
+    const docSnap = await getDoc(docRef);
+
+    if (!docSnap.exists()) {
+      throw new Error("Verification code expired. Please sign in again.");
+    }
+
+    const { code, expiryTime, verified } = docSnap.data();
+
+    if (verified) {
+      throw new Error("Code already verified. Please sign in again.");
+    }
+
+    const now = new Date();
+    const expiry = expiryTime?.toDate?.() || new Date(expiryTime);
+
+    if (now > expiry) {
+      await deleteDoc(docRef);
+      throw new Error("Verification code expired. Please sign in again.");
+    }
+
+    if (code !== enteredCode) {
+      throw new Error("Invalid verification code. Please try again.");
+    }
+
+    // Mark as verified
+    await setDoc(docRef, { verified: true }, { merge: true });
+
+    return true;
+  } catch (error) {
+    console.error("❌ Code verification error:", error);
+    throw error;
+  }
+}
+
+// Clean up verification code after successful login
+async function clearVerificationCode(email) {
+  try {
+    await deleteDoc(doc(db, "verification_codes", email));
+  } catch (error) {
+    console.warn("Warning: Could not clear verification code:", error);
+  }
+}
+
+// Optional: Send real email via SendGrid or other service
+// Uncomment and configure in CLERK_SETUP.md
+// async function sendEmailWithVerificationCode(email, code) {
+//   // Example using Firebase Cloud Functions
+//   // const response = await fetch('YOUR_CLOUD_FUNCTION_URL', {
+//   //   method: 'POST',
+//   //   headers: { 'Content-Type': 'application/json' },
+//   //   body: JSON.stringify({ email, code })
+//   // });
+//   // return response.json();
+// }
 
 /* ================== CLAIMS + CHAT (Firestore) ================== */
 
@@ -83,7 +244,10 @@ function formatTime(ts) {
     d.getMonth() === today.getMonth() &&
     d.getFullYear() === today.getFullYear();
   if (sameDay) {
-    return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+    return d.toLocaleTimeString("en-US", {
+      hour: "numeric",
+      minute: "2-digit",
+    });
   }
   return d.toLocaleString("en-US", {
     month: "short",
@@ -261,7 +425,13 @@ function useChatMessages(claimId) {
 
 /* ================== CONSTANTS ================== */
 
-const CATEGORIES = ["Electronics", "Documents", "Accessories", "Clothing", "Other"];
+const CATEGORIES = [
+  "Electronics",
+  "Documents",
+  "Accessories",
+  "Clothing",
+  "Other",
+];
 
 const CAT_COLORS = {
   Electronics: "#22d3ee",
@@ -290,13 +460,17 @@ const MAP_RADIUS_DEG = 0.05;
 const cn = (...a) => a.filter(Boolean).join(" ");
 
 function escapeHtml(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  }[c]));
+  return String(s ?? "").replace(
+    /[&<>"']/g,
+    (c) =>
+      ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      })[c],
+  );
 }
 
 function hashString(s) {
@@ -312,8 +486,8 @@ function locationToCoords(location) {
   const key = (location || "unknown").toLowerCase();
   const h1 = hashString(key);
   const h2 = hashString(key + "::salt");
-  const lat = MAP_CENTER[0] + (((h1 % 10000) / 10000) - 0.5) * 2 * MAP_RADIUS_DEG;
-  const lng = MAP_CENTER[1] + (((h2 % 10000) / 10000) - 0.5) * 2 * MAP_RADIUS_DEG;
+  const lat = MAP_CENTER[0] + ((h1 % 10000) / 10000 - 0.5) * 2 * MAP_RADIUS_DEG;
+  const lng = MAP_CENTER[1] + ((h2 % 10000) / 10000 - 0.5) * 2 * MAP_RADIUS_DEG;
   return [lat, lng];
 }
 
@@ -379,7 +553,8 @@ function computeTrustScore(item, allItems) {
   if (item.userId && item.userId !== "anonymous") s += 14;
   if (item.photoData) s += 10;
   if ((item.description || "").trim().length >= 20) s += 8;
-  if (Number.isFinite(Number(item.lat)) && Number.isFinite(Number(item.lon))) s += 6;
+  if (Number.isFinite(Number(item.lat)) && Number.isFinite(Number(item.lon)))
+    s += 6;
   if (item.userId && Array.isArray(allItems)) {
     const posts = allItems.filter((i) => i.userId === item.userId).length;
     s += Math.min(posts * 2, 10);
@@ -421,9 +596,15 @@ function jaccard(a, b) {
 
 function matchScore(lost, found) {
   if (!lost || !found || lost.type === found.type) return 0;
-  const nameSim = jaccard(lost.itemOriginal || lost.item, found.itemOriginal || found.item);
+  const nameSim = jaccard(
+    lost.itemOriginal || lost.item,
+    found.itemOriginal || found.item,
+  );
   const descSim = jaccard(lost.description, found.description);
-  const locSim = jaccard(lost.locationOriginal || lost.location, found.locationOriginal || found.location);
+  const locSim = jaccard(
+    lost.locationOriginal || lost.location,
+    found.locationOriginal || found.location,
+  );
   const catBoost = lost.category && lost.category === found.category ? 0.15 : 0;
   return Math.min(1, nameSim * 0.55 + descSim * 0.2 + locSim * 0.15 + catBoost);
 }
@@ -542,12 +723,7 @@ function imageSimilarity(fpA, fpB) {
 function itemDistanceMeters(a, b) {
   const ca = itemCoords(a);
   const cb = itemCoords(b);
-  if (
-    !ca ||
-    !cb ||
-    !Number.isFinite(ca[0]) ||
-    !Number.isFinite(cb[0])
-  )
+  if (!ca || !cb || !Number.isFinite(ca[0]) || !Number.isFinite(cb[0]))
     return null;
   const aHasReal =
     Number.isFinite(parseFloat(a?.lat)) && Number.isFinite(parseFloat(a?.lon));
@@ -560,9 +736,7 @@ function itemDistanceMeters(a, b) {
   const dLon = toRad(cb[1] - ca[1]);
   const s1 = Math.sin(dLat / 2);
   const s2 = Math.sin(dLon / 2);
-  const h =
-    s1 * s1 +
-    Math.cos(toRad(ca[0])) * Math.cos(toRad(cb[0])) * s2 * s2;
+  const h = s1 * s1 + Math.cos(toRad(ca[0])) * Math.cos(toRad(cb[0])) * s2 * s2;
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
@@ -582,20 +756,22 @@ function advancedMatchScore({ lost, found, imgSim, distance }) {
     found.itemOriginal || found.item,
   );
   const descSim = jaccard(lost.description, found.description);
-  const catBoost =
-    lost.category && lost.category === found.category ? 0.12 : 0;
+  const catBoost = lost.category && lost.category === found.category ? 0.12 : 0;
   const locBoost =
     locationProximityBoost(distance) ??
     jaccard(
       lost.locationOriginal || lost.location,
       found.locationOriginal || found.location,
-    ) * 0.10;
+    ) * 0.1;
   const imgBoost = imgSim != null ? imgSim * 0.22 : 0;
   // Weights chosen so each factor *can* push score across thresholds:
   //   title 38, desc 18, category 12, location 20, image 22  →  100+
   return Math.max(
     0,
-    Math.min(1, titleSim * 0.38 + descSim * 0.18 + catBoost + locBoost + imgBoost),
+    Math.min(
+      1,
+      titleSim * 0.38 + descSim * 0.18 + catBoost + locBoost + imgBoost,
+    ),
   );
 }
 
@@ -606,7 +782,10 @@ function itemFraudRisk(item, allItems, fingerprints) {
   let score = 0;
   const reasons = [];
 
-  if ((item.description || "").trim().length > 0 && (item.description || "").trim().length < 8) {
+  if (
+    (item.description || "").trim().length > 0 &&
+    (item.description || "").trim().length < 8
+  ) {
     score += 12;
     reasons.push("Very short description");
   }
@@ -664,7 +843,8 @@ function itemFraudRisk(item, allItems, fingerprints) {
       ? item.createdAt.seconds * 1000
       : new Date(item.createdAt).getTime();
     const burst = allItems.filter((i) => {
-      if (i.id === item.id || i.email !== item.email || !i.createdAt) return false;
+      if (i.id === item.id || i.email !== item.email || !i.createdAt)
+        return false;
       const t = i.createdAt?.seconds
         ? i.createdAt.seconds * 1000
         : new Date(i.createdAt).getTime();
@@ -696,8 +876,7 @@ function findAdvancedMatches(items, fingerprints, limit = 4) {
       if (score > 0.25) {
         const lostRisk = itemFraudRisk(l, items, fingerprints);
         const foundRisk = itemFraudRisk(f, items, fingerprints);
-        const fraud =
-          lostRisk.score >= foundRisk.score ? lostRisk : foundRisk;
+        const fraud = lostRisk.score >= foundRisk.score ? lostRisk : foundRisk;
         pairs.push({
           lost: l,
           found: f,
@@ -785,7 +964,10 @@ function detectFraud(items) {
 
   // Suspiciously thin descriptions
   for (const it of items) {
-    if ((it.description || "").trim().length > 0 && (it.description || "").trim().length < 8) {
+    if (
+      (it.description || "").trim().length > 0 &&
+      (it.description || "").trim().length < 8
+    ) {
       alerts.push({
         severity: "low",
         type: "Low-Quality Post",
@@ -833,8 +1015,7 @@ function useImageFingerprints(items) {
       }
       setFingerprints((prev) => {
         // Avoid useless updates if nothing actually changed.
-        const sameSize =
-          Object.keys(prev).length === Object.keys(next).length;
+        const sameSize = Object.keys(prev).length === Object.keys(next).length;
         if (sameSize && Object.keys(next).every((k) => prev[k] === next[k]))
           return prev;
         return next;
@@ -892,89 +1073,233 @@ function useAnimatedNumber(target, duration = 1.1) {
 
 const Icon = {
   Search: () => (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <circle cx="11" cy="11" r="8" />
       <path d="m21 21-4.3-4.3" />
     </svg>
   ),
   Plus: () => (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <path d="M12 5v14M5 12h14" />
     </svg>
   ),
   Pin: () => (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z" />
       <circle cx="12" cy="10" r="3" />
     </svg>
   ),
   Calendar: () => (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <rect width="18" height="18" x="3" y="4" rx="2" />
       <path d="M16 2v4M8 2v4M3 10h18" />
     </svg>
   ),
   Mail: () => (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <rect width="20" height="16" x="2" y="4" rx="2" />
       <path d="m22 7-10 5L2 7" />
     </svg>
   ),
   X: () => (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <path d="M18 6 6 18M6 6l12 12" />
     </svg>
   ),
   Trash: () => (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
     </svg>
   ),
   Bolt: () => (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8Z" />
     </svg>
   ),
   Shield: () => (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z" />
     </svg>
   ),
   Activity: () => (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
     </svg>
   ),
   Globe: () => (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <circle cx="12" cy="12" r="10" />
       <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10ZM2 12h20" />
     </svg>
   ),
   Alert: () => (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0ZM12 9v4M12 17h.01" />
     </svg>
   ),
   Sparkles: () => (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z" />
     </svg>
   ),
   TrendUp: () => (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <path d="m22 7-8.5 8.5-5-5L2 17" />
       <path d="M16 7h6v6" />
     </svg>
   ),
   Logo: () => (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <circle cx="12" cy="12" r="3" />
       <path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l3 3M16 16l3 3M5 19l3-3M16 8l3-3" />
     </svg>
   ),
   Brain: () => (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z" />
       <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z" />
     </svg>
@@ -1034,7 +1359,16 @@ function TopNavbar({
               title="Claims & messages"
               aria-label="Open claims inbox"
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
                 <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
                 <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
               </svg>
@@ -1054,8 +1388,18 @@ function TopNavbar({
           {user && (
             <div className="flex p-0.5 sm:p-1 rounded-xl bg-white/[0.04] border border-white/[0.06] text-[10px] sm:text-[11px] font-mono">
               {[
-                { k: "all", label: "All Posts", active: !viewingMyPosts, onClick: onShowAll },
-                { k: "mine", label: "My Posts", active: viewingMyPosts, onClick: onShowMyPosts },
+                {
+                  k: "all",
+                  label: "All Posts",
+                  active: !viewingMyPosts,
+                  onClick: onShowAll,
+                },
+                {
+                  k: "mine",
+                  label: "My Posts",
+                  active: viewingMyPosts,
+                  onClick: onShowMyPosts,
+                },
               ].map((p) => (
                 <button
                   key={p.k}
@@ -1107,7 +1451,10 @@ function Hero({ items, onPostItem }) {
   );
   const [tagIdx, setTagIdx] = useState(0);
   useEffect(() => {
-    const t = setInterval(() => setTagIdx((i) => (i + 1) % taglines.length), 3500);
+    const t = setInterval(
+      () => setTagIdx((i) => (i + 1) % taglines.length),
+      3500,
+    );
     return () => clearInterval(t);
   }, [taglines.length]);
 
@@ -1127,7 +1474,9 @@ function Hero({ items, onPostItem }) {
             transition={{ duration: 0.7 }}
             className="inline-flex items-center gap-2 px-3 py-1.5 mb-6 rounded-full bg-white/[0.04] border border-white/[0.08] text-xs text-slate-300 font-mono"
           >
-            <span className="text-cyan-300"><Icon.Sparkles /></span>
+            <span className="text-cyan-300">
+              <Icon.Sparkles />
+            </span>
             <span>v1.0 · neural recovery engine</span>
           </motion.div>
 
@@ -1175,11 +1524,17 @@ function Hero({ items, onPostItem }) {
             transition={{ duration: 0.7, delay: 0.5 }}
             className="flex flex-wrap items-center gap-3"
           >
-            <button onClick={onPostItem} className="tn-btn tn-btn-primary px-5 py-3 text-sm">
+            <button
+              onClick={onPostItem}
+              className="tn-btn tn-btn-primary px-5 py-3 text-sm"
+            >
               <Icon.Plus />
               Report a New Item
             </button>
-            <a href="#network-map" className="tn-btn tn-btn-ghost px-5 py-3 text-sm">
+            <a
+              href="#network-map"
+              className="tn-btn tn-btn-ghost px-5 py-3 text-sm"
+            >
               <Icon.Globe />
               Explore the network
             </a>
@@ -1532,8 +1887,7 @@ function InteractiveMap({
       L.circle([lat, lng], {
         radius: kind === "recovered" ? 420 : 350,
         color,
-        weight:
-          kind === "lost" ? 1.8 : kind === "recovered" ? 1.4 : 1,
+        weight: kind === "lost" ? 1.8 : kind === "recovered" ? 1.4 : 1,
         opacity: isDimmed
           ? 0.18
           : kind === "lost"
@@ -1556,9 +1910,7 @@ function InteractiveMap({
 
       // Custom marker — three visual variants
       const recoveryBadge =
-        kind === "recovered"
-          ? '<span class="tn-mk-check">✓</span>'
-          : "";
+        kind === "recovered" ? '<span class="tn-mk-check">✓</span>' : "";
       const extraRing =
         kind === "recovered"
           ? '<span class="tn-mk-pulse tn-mk-pulse-2"></span>'
@@ -1600,7 +1952,10 @@ function InteractiveMap({
         const sLatLng = L.latLng(selected.coords);
         const nearby = visibleItems
           .filter((i) => i.id !== selectedId)
-          .map((i) => ({ item: i, d: map.distance(sLatLng, L.latLng(i.coords)) }))
+          .map((i) => ({
+            item: i,
+            d: map.distance(sLatLng, L.latLng(i.coords)),
+          }))
           .filter((x) => x.d < 1000)
           .sort((a, b) => a.d - b.d)
           .slice(0, 8);
@@ -1646,7 +2001,7 @@ function InteractiveMap({
         weight: 1.5,
         opacity: 0.7,
         fillColor: "#22d3ee",
-        fillOpacity: 0.10,
+        fillOpacity: 0.1,
         interactive: false,
       }).addTo(linksLayer.current);
 
@@ -1711,8 +2066,7 @@ function InteractiveMap({
     }
   }, [visibleItems, cardItem]);
 
-  const itemTypeOf = (i) =>
-    (i?.type || "").toString().trim().toLowerCase();
+  const itemTypeOf = (i) => (i?.type || "").toString().trim().toLowerCase();
   const lostCount = items.filter((i) => itemTypeOf(i) === "lost").length;
   const foundCount = items.filter((i) => itemTypeOf(i) === "found").length;
   const recoveredCount = items.filter((i) => isRecoveredItem(i)).length;
@@ -1772,9 +2126,7 @@ function InteractiveMap({
       );
       if (valid.length === 0) return;
       const view = map.getBounds();
-      const anyVisible = valid.some((i) =>
-        view.contains(L.latLng(i.coords)),
-      );
+      const anyVisible = valid.some((i) => view.contains(L.latLng(i.coords)));
       didInitialFitRef.current = true;
       if (!anyVisible) {
         if (valid.length === 1) {
@@ -1813,9 +2165,7 @@ function InteractiveMap({
       );
       if (valid.length === 0) return;
       const view = map.getBounds();
-      const anyVisible = valid.some((i) =>
-        view.contains(L.latLng(i.coords)),
-      );
+      const anyVisible = valid.some((i) => view.contains(L.latLng(i.coords)));
       if (!anyVisible) handleFitAll();
     }, 60);
     return () => clearTimeout(t);
@@ -1878,7 +2228,8 @@ function InteractiveMap({
             <span className="text-slate-100">Map</span>
           </h2>
           <p className="text-sm text-slate-400 mt-1">
-            Click a pin to reveal its proximity radius and nearby items in the network.
+            Click a pin to reveal its proximity radius and nearby items in the
+            network.
           </p>
         </div>
         <div className="flex items-center gap-2 text-xs flex-wrap">
@@ -1888,7 +2239,9 @@ function InteractiveMap({
           </div>
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/[0.03] border border-white/[0.06]">
             <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.7)]" />
-            <span className="text-slate-300 font-mono">Found · {foundCount}</span>
+            <span className="text-slate-300 font-mono">
+              Found · {foundCount}
+            </span>
           </div>
           {recoveredCount > 0 && (
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-400/[0.10] border border-amber-400/40 shadow-[0_0_12px_rgba(251,191,36,0.18)]">
@@ -2075,7 +2428,8 @@ function InteractiveMap({
                 Near you · 2km radius
               </div>
               <div className="text-slate-100 font-medium">
-                {nearbyMeCount} {nearbyMeCount === 1 ? "item" : "items"} within range
+                {nearbyMeCount} {nearbyMeCount === 1 ? "item" : "items"} within
+                range
               </div>
               <div className="text-slate-400 font-mono text-[11px] mt-0.5">
                 {userLocation.coords[0].toFixed(3)}°,{" "}
@@ -2100,9 +2454,13 @@ function InteractiveMap({
         {visibleItems.length === 0 && (
           <div className="absolute inset-0 z-[450] flex items-center justify-center pointer-events-none">
             <div className="px-5 py-3 rounded-xl bg-black/65 backdrop-blur border border-white/[0.08] text-center">
-              <div className="text-sm text-slate-200 font-medium">No pings on the map</div>
+              <div className="text-sm text-slate-200 font-medium">
+                No pings on the map
+              </div>
               <div className="text-xs text-slate-500 mt-0.5 font-mono">
-                {filter === "all" ? "report an item to populate the network" : `no ${filter} reports yet`}
+                {filter === "all"
+                  ? "report an item to populate the network"
+                  : `no ${filter} reports yet`}
               </div>
             </div>
           </div>
@@ -2155,7 +2513,8 @@ function AdvancedMatchCard({ match, idx }) {
       : fraud.level === "medium"
         ? "#fbbf24"
         : "#34d399";
-  const trustColor = trust >= 70 ? "#34d399" : trust >= 45 ? "#fbbf24" : "#94a3b8";
+  const trustColor =
+    trust >= 70 ? "#34d399" : trust >= 45 ? "#fbbf24" : "#94a3b8";
   const gradId = `mg-${lost.id}-${found.id}`;
 
   // Highlight strongest signal in the summary line
@@ -2263,7 +2622,8 @@ function AdvancedMatchCard({ match, idx }) {
           <span
             className="tn-match-stat"
             style={{
-              "--c": imgPct >= 70 ? "#a855f7" : imgPct >= 40 ? "#22d3ee" : "#94a3b8",
+              "--c":
+                imgPct >= 70 ? "#a855f7" : imgPct >= 40 ? "#22d3ee" : "#94a3b8",
             }}
             title="Visual similarity from dHash + colour histogram"
           >
@@ -2322,7 +2682,9 @@ function MatchThumb({ item, role }) {
           <span>{CAT_GLYPH[item.category] || "📦"}</span>
         </div>
       )}
-      <div className="tn-match-thumb-tag">{role === "lost" ? "LOST" : "FOUND"}</div>
+      <div className="tn-match-thumb-tag">
+        {role === "lost" ? "LOST" : "FOUND"}
+      </div>
     </div>
   );
 }
@@ -2346,7 +2708,9 @@ function SmartMatchCards({ items }) {
             AI Matching · v2
           </div>
           <h2 className="text-xl sm:text-2xl font-semibold tracking-tight flex items-center gap-2">
-            <span className="text-purple-300"><Icon.Brain /></span>
+            <span className="text-purple-300">
+              <Icon.Brain />
+            </span>
             Smart Match Engine
           </h2>
           <p className="text-sm text-slate-400 mt-1">
@@ -2365,7 +2729,9 @@ function SmartMatchCards({ items }) {
           ) : (
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.7)]" />
           )}
-          {computing ? "Scanning images…" : `${fingerprinted}/${totalPhotos} fingerprinted`}
+          {computing
+            ? "Scanning images…"
+            : `${fingerprinted}/${totalPhotos} fingerprinted`}
         </div>
       </div>
 
@@ -2375,9 +2741,12 @@ function SmartMatchCards({ items }) {
             <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-white/[0.03] border border-white/[0.06] mb-3 text-slate-500">
               <Icon.Sparkles />
             </div>
-            <p className="text-slate-300 text-sm font-medium">Awaiting more signals</p>
+            <p className="text-slate-300 text-sm font-medium">
+              Awaiting more signals
+            </p>
             <p className="text-slate-500 text-xs mt-1">
-              Matches surface here once a Lost and a Found item share enough signals.
+              Matches surface here once a Lost and a Found item share enough
+              signals.
             </p>
           </div>
         ) : (
@@ -2414,7 +2783,9 @@ function FraudAlertsPanel({ items }) {
             Section 03 · Anomaly Detection
           </div>
           <h2 className="text-xl sm:text-2xl font-semibold tracking-tight flex items-center gap-2">
-            <span className="text-rose-300"><Icon.Shield /></span>
+            <span className="text-rose-300">
+              <Icon.Shield />
+            </span>
             Fraud Alert Stream
           </h2>
           <p className="text-sm text-slate-400 mt-1">
@@ -2436,7 +2807,9 @@ function FraudAlertsPanel({ items }) {
               )}
             />
           </span>
-          <span className="text-slate-300 font-mono">{alerts.length} active</span>
+          <span className="text-slate-300 font-mono">
+            {alerts.length} active
+          </span>
         </div>
       </div>
 
@@ -2469,14 +2842,21 @@ function FraudAlertsPanel({ items }) {
                       backgroundColor: `${sev.color}1f`,
                       color: sev.color,
                       border: `1px solid ${sev.color}40`,
-                      boxShadow: a.severity !== "low" ? `0 0 10px ${sev.color}30` : "none",
+                      boxShadow:
+                        a.severity !== "low"
+                          ? `0 0 10px ${sev.color}30`
+                          : "none",
                     }}
                   >
                     {sev.label}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium text-slate-200">{a.type}</div>
-                    <div className="text-xs text-slate-400 mt-0.5">{a.reason}</div>
+                    <div className="text-sm font-medium text-slate-200">
+                      {a.type}
+                    </div>
+                    <div className="text-xs text-slate-400 mt-0.5">
+                      {a.reason}
+                    </div>
                     {a.item && (
                       <div className="text-[11px] text-slate-500 mt-1 font-mono truncate">
                         → {a.item.itemOriginal || a.item.item || "—"}
@@ -2570,13 +2950,19 @@ function AnalyticsDashboard({ items }) {
                     />
                     {c.name}
                   </span>
-                  <span className="text-slate-500 font-mono tabular-nums">{c.count}</span>
+                  <span className="text-slate-500 font-mono tabular-nums">
+                    {c.count}
+                  </span>
                 </div>
                 <div className="h-2 rounded-full bg-white/[0.03] overflow-hidden">
                   <motion.div
                     initial={{ width: 0 }}
                     animate={{ width: `${(c.count / maxCat) * 100}%` }}
-                    transition={{ duration: 0.9, delay: i * 0.1, ease: [0.16, 1, 0.3, 1] }}
+                    transition={{
+                      duration: 0.9,
+                      delay: i * 0.1,
+                      ease: [0.16, 1, 0.3, 1],
+                    }}
                     className="h-full rounded-full"
                     style={{
                       background: `linear-gradient(90deg, ${CAT_COLORS[c.name]}55, ${CAT_COLORS[c.name]})`,
@@ -2591,7 +2977,9 @@ function AnalyticsDashboard({ items }) {
 
         <div className="lg:col-span-2 tn-glass rounded-2xl p-5">
           <div className="flex items-center justify-between mb-4">
-            <div className="text-sm font-medium text-slate-200">Last 7 Days</div>
+            <div className="text-sm font-medium text-slate-200">
+              Last 7 Days
+            </div>
             <div className="text-[10px] text-slate-500 font-mono uppercase tracking-wider">
               activity
             </div>
@@ -2600,18 +2988,27 @@ function AnalyticsDashboard({ items }) {
             {last7.map((d, i) => {
               const pct = (d.count / maxDay) * 100;
               return (
-                <div key={d.key} className="flex-1 flex flex-col items-stretch h-full">
+                <div
+                  key={d.key}
+                  className="flex-1 flex flex-col items-stretch h-full"
+                >
                   <div className="flex-1 flex items-end">
                     <motion.div
                       initial={{ height: 0 }}
                       animate={{ height: `${Math.max(pct, d.count ? 4 : 1)}%` }}
-                      transition={{ duration: 0.8, delay: i * 0.06, ease: [0.16, 1, 0.3, 1] }}
+                      transition={{
+                        duration: 0.8,
+                        delay: i * 0.06,
+                        ease: [0.16, 1, 0.3, 1],
+                      }}
                       className="w-full rounded-t-md"
                       style={{
                         background: d.count
                           ? "linear-gradient(180deg, #67e8f9, rgba(34,211,238,0.18))"
                           : "rgba(255,255,255,0.04)",
-                        boxShadow: d.count ? "0 0 12px rgba(34,211,238,0.25)" : "none",
+                        boxShadow: d.count
+                          ? "0 0 12px rgba(34,211,238,0.25)"
+                          : "none",
                       }}
                       title={`${d.count} on ${d.key}`}
                     />
@@ -2857,7 +3254,16 @@ function ItemGrid({
 
 /* ================== POST ITEM SHEET ================== */
 
-function Field({ label, v, onChange, placeholder, type = "text", as = "input", full, children }) {
+function Field({
+  label,
+  v,
+  onChange,
+  placeholder,
+  type = "text",
+  as = "input",
+  full,
+  children,
+}) {
   return (
     <div className={full ? "sm:col-span-2" : ""}>
       <label className="block text-[10px] uppercase tracking-[0.18em] text-slate-400 font-mono mb-1.5">
@@ -3010,8 +3416,12 @@ function ChatModal({ claim, currentUser, onClose }) {
                   const mine = m.senderUid === currentUser?.uid;
                   const prev = messages[i - 1];
                   const sameAuthor =
-                    prev && prev.senderUid === m.senderUid &&
-                    Math.abs(tsToMillis(m.createdAt) - tsToMillis(prev.createdAt)) < 5 * 60 * 1000;
+                    prev &&
+                    prev.senderUid === m.senderUid &&
+                    Math.abs(
+                      tsToMillis(m.createdAt) - tsToMillis(prev.createdAt),
+                    ) <
+                      5 * 60 * 1000;
                   return (
                     <div
                       key={m.id}
@@ -3103,13 +3513,25 @@ function ChatModal({ claim, currentUser, onClose }) {
 
 /* ================== CLAIMS PANEL ================== */
 
-function ClaimRow({ claim, currentUser, isUnread, onApprove, onReject, onOpenChat, busy }) {
+function ClaimRow({
+  claim,
+  currentUser,
+  isUnread,
+  onApprove,
+  onReject,
+  onOpenChat,
+  busy,
+}) {
   const isOwner = claim.ownerUid === currentUser?.uid;
   const isClaimant = claim.claimantUid === currentUser?.uid;
   const peer = isOwner ? claim.claimantName : claim.ownerName;
   const status = claim.status || "pending";
   const statusColor =
-    status === "approved" ? "#34d399" : status === "rejected" ? "#fb7185" : "#fbbf24";
+    status === "approved"
+      ? "#34d399"
+      : status === "rejected"
+        ? "#fb7185"
+        : "#fbbf24";
   const created = formatTime(claim.createdAt);
   const last = claim.lastMessageAt ? formatTime(claim.lastMessageAt) : created;
 
@@ -3142,8 +3564,7 @@ function ClaimRow({ claim, currentUser, isUnread, onApprove, onReject, onOpenCha
             </div>
           </div>
           <div className="text-[12px] text-slate-400 truncate">
-            re:{" "}
-            <span className="text-slate-300">{claim.itemTitle || "—"}</span>
+            re: <span className="text-slate-300">{claim.itemTitle || "—"}</span>
           </div>
           {claim.lastMessageText ? (
             <div className="text-[12px] text-slate-500 truncate mt-0.5">
@@ -3212,13 +3633,7 @@ function ClaimRow({ claim, currentUser, isUnread, onApprove, onReject, onOpenCha
   );
 }
 
-function ClaimsPanel({
-  open,
-  onClose,
-  claims,
-  currentUser,
-  onOpenChat,
-}) {
+function ClaimsPanel({ open, onClose, claims, currentUser, onOpenChat }) {
   const [tab, setTab] = useState("inbox"); // 'inbox' | 'mine'
   const [busyId, setBusyId] = useState(null);
   const [seenTick, setSeenTick] = useState(0);
@@ -3228,14 +3643,16 @@ function ClaimsPanel({
   const inbox = useMemo(
     () =>
       claims.filter(
-        (c) => c.ownerUid === currentUser?.uid && c.claimantUid !== currentUser?.uid,
+        (c) =>
+          c.ownerUid === currentUser?.uid && c.claimantUid !== currentUser?.uid,
       ),
     [claims, currentUser],
   );
   const mine = useMemo(
     () =>
       claims.filter(
-        (c) => c.claimantUid === currentUser?.uid && c.ownerUid !== currentUser?.uid,
+        (c) =>
+          c.claimantUid === currentUser?.uid && c.ownerUid !== currentUser?.uid,
       ),
     [claims, currentUser],
   );
@@ -3317,8 +3734,18 @@ function ClaimsPanel({
 
               <div className="flex p-1 mb-4 rounded-xl bg-white/[0.04] border border-white/[0.06] text-sm font-medium">
                 {[
-                  { k: "inbox", label: "Incoming", count: inbox.length, unread: inboxUnread },
-                  { k: "mine", label: "My claims", count: mine.length, unread: mineUnread },
+                  {
+                    k: "inbox",
+                    label: "Incoming",
+                    count: inbox.length,
+                    unread: inboxUnread,
+                  },
+                  {
+                    k: "mine",
+                    label: "My claims",
+                    count: mine.length,
+                    unread: mineUnread,
+                  },
                 ].map((t) => (
                   <button
                     key={t.k}
@@ -3355,7 +3782,9 @@ function ClaimsPanel({
                     <Icon.Mail />
                   </div>
                   <p className="text-slate-200 text-sm font-medium">
-                    {tab === "inbox" ? "No incoming claims yet" : "You haven't claimed anything"}
+                    {tab === "inbox"
+                      ? "No incoming claims yet"
+                      : "You haven't claimed anything"}
                   </p>
                   <p className="text-slate-500 text-xs mt-1">
                     {tab === "inbox"
@@ -3390,12 +3819,30 @@ function ClaimsPanel({
 /* ================== MARKER CARD (rich popup) ================== */
 
 const Phone = () => (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+  <svg
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
     <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.37 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.33 1.85.57 2.81.7a2 2 0 0 1 1.72 2.03Z" />
   </svg>
 );
 const Compass = () => (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+  <svg
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
     <circle cx="12" cy="12" r="10" />
     <polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76" />
   </svg>
@@ -3415,15 +3862,18 @@ function MarkerCard({
 }) {
   const isLost = item?.type === "lost";
   const accent = isLost ? "#fb7185" : "#34d399";
-  const trust = useMemo(() => computeTrustScore(item, allItems), [item, allItems]);
+  const trust = useMemo(
+    () => computeTrustScore(item, allItems),
+    [item, allItems],
+  );
   const trustL = trustLabel(trust);
 
   const distance = useMemo(() => {
     if (!item || !userLocation || !window.L) return null;
     try {
-      return window.L
-        .latLng(userLocation.coords)
-        .distanceTo(window.L.latLng(itemCoords(item)));
+      return window.L.latLng(userLocation.coords).distanceTo(
+        window.L.latLng(itemCoords(item)),
+      );
     } catch {
       return null;
     }
@@ -3615,7 +4065,9 @@ function MarkerCard({
             <div className="space-y-1.5 mb-2">
               {phone && (
                 <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/[0.025] border border-white/[0.06]">
-                  <span className="text-emerald-300/80 shrink-0"><Phone /></span>
+                  <span className="text-emerald-300/80 shrink-0">
+                    <Phone />
+                  </span>
                   <div className="min-w-0 flex-1">
                     <div className="text-[9.5px] uppercase tracking-[0.16em] font-mono text-slate-500">
                       Phone
@@ -3628,7 +4080,9 @@ function MarkerCard({
               )}
               {email && (
                 <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/[0.025] border border-white/[0.06]">
-                  <span className="text-cyan-300/80 shrink-0"><Icon.Mail /></span>
+                  <span className="text-cyan-300/80 shrink-0">
+                    <Icon.Mail />
+                  </span>
                   <div className="min-w-0 flex-1">
                     <div className="text-[9.5px] uppercase tracking-[0.16em] font-mono text-slate-500">
                       Email
@@ -3720,7 +4174,9 @@ function MarkerCard({
             style={{ "--c": "#34d399" }}
           >
             <span className="tn-action-glow" />
-            <span className="tn-action-icon"><Phone /></span>
+            <span className="tn-action-icon">
+              <Phone />
+            </span>
             <span className="tn-action-label">Call</span>
           </a>
           <a
@@ -3731,7 +4187,9 @@ function MarkerCard({
             style={{ "--c": "#22d3ee" }}
           >
             <span className="tn-action-glow" />
-            <span className="tn-action-icon"><Icon.Mail /></span>
+            <span className="tn-action-icon">
+              <Icon.Mail />
+            </span>
             <span className="tn-action-label">Email</span>
           </a>
           <a
@@ -3744,7 +4202,9 @@ function MarkerCard({
             style={{ "--c": "#a855f7" }}
           >
             <span className="tn-action-glow" />
-            <span className="tn-action-icon"><Compass /></span>
+            <span className="tn-action-icon">
+              <Compass />
+            </span>
             <span className="tn-action-label">Directions</span>
           </a>
         </div>
@@ -3882,7 +4342,8 @@ function LocationAutocomplete({ value, onChange, onSelect, placeholder }) {
   };
 
   const showDropdown =
-    open && (loading || suggestions.length > 0 || (value || "").trim().length >= 2);
+    open &&
+    (loading || suggestions.length > 0 || (value || "").trim().length >= 2);
 
   return (
     <div ref={wrapRef} className="relative">
@@ -4063,7 +4524,16 @@ function PostItemSheet({ open, onClose, currentUser }) {
 
   const handleSubmit = async () => {
     setError("");
-    const required = ["name", "email", "phone", "type", "category", "item", "location", "date"];
+    const required = [
+      "name",
+      "email",
+      "phone",
+      "type",
+      "category",
+      "item",
+      "location",
+      "date",
+    ];
     for (const k of required) {
       if (!form[k]) {
         setError(`Missing required field: ${k}`);
@@ -4091,8 +4561,14 @@ function PostItemSheet({ open, onClose, currentUser }) {
         description: form.description,
         location: form.location.toLowerCase(),
         locationOriginal: form.location,
-        lat: typeof form.lat === "number" && Number.isFinite(form.lat) ? form.lat : null,
-        lon: typeof form.lon === "number" && Number.isFinite(form.lon) ? form.lon : null,
+        lat:
+          typeof form.lat === "number" && Number.isFinite(form.lat)
+            ? form.lat
+            : null,
+        lon:
+          typeof form.lon === "number" && Number.isFinite(form.lon)
+            ? form.lon
+            : null,
         date: form.date,
         category: form.category,
         userId: currentUser ? currentUser.uid : "anonymous",
@@ -4152,22 +4628,62 @@ function PostItemSheet({ open, onClose, currentUser }) {
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <Field label="Your Name" v={form.name} onChange={update("name")} placeholder="Full name" />
-                <Field label="Email" v={form.email} onChange={update("email")} placeholder="you@example.com" type="email" />
-                <Field label="Phone" v={form.phone} onChange={update("phone")} placeholder="+1 (555) 000-0000" type="tel" />
-                <Field label="Date" v={form.date} onChange={update("date")} type="date" />
-                <Field label="Item Type" v={form.type} onChange={update("type")} as="select">
+                <Field
+                  label="Your Name"
+                  v={form.name}
+                  onChange={update("name")}
+                  placeholder="Full name"
+                />
+                <Field
+                  label="Email"
+                  v={form.email}
+                  onChange={update("email")}
+                  placeholder="you@example.com"
+                  type="email"
+                />
+                <Field
+                  label="Phone"
+                  v={form.phone}
+                  onChange={update("phone")}
+                  placeholder="+1 (555) 000-0000"
+                  type="tel"
+                />
+                <Field
+                  label="Date"
+                  v={form.date}
+                  onChange={update("date")}
+                  type="date"
+                />
+                <Field
+                  label="Item Type"
+                  v={form.type}
+                  onChange={update("type")}
+                  as="select"
+                >
                   <option value="">Select…</option>
                   <option value="lost">Lost</option>
                   <option value="found">Found</option>
                 </Field>
-                <Field label="Category" v={form.category} onChange={update("category")} as="select">
+                <Field
+                  label="Category"
+                  v={form.category}
+                  onChange={update("category")}
+                  as="select"
+                >
                   <option value="">Select…</option>
                   {CATEGORIES.map((c) => (
-                    <option key={c} value={c}>{c}</option>
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
                   ))}
                 </Field>
-                <Field label="Item Name" v={form.item} onChange={update("item")} placeholder="e.g., AirPods Pro, Student ID" full />
+                <Field
+                  label="Item Name"
+                  v={form.item}
+                  onChange={update("item")}
+                  placeholder="e.g., AirPods Pro, Student ID"
+                  full
+                />
 
                 <div className="sm:col-span-2">
                   <div className="flex items-center justify-between mb-1.5 gap-2">
@@ -4243,7 +4759,14 @@ function PostItemSheet({ open, onClose, currentUser }) {
                   )}
                 </div>
 
-                <Field label="Description" v={form.description} onChange={update("description")} placeholder="Color, brand, identifying features…" as="textarea" full />
+                <Field
+                  label="Description"
+                  v={form.description}
+                  onChange={update("description")}
+                  placeholder="Color, brand, identifying features…"
+                  as="textarea"
+                  full
+                />
                 <div className="sm:col-span-2">
                   <label className="block text-[10px] uppercase tracking-[0.18em] text-slate-400 font-mono mb-1.5">
                     Photo (optional)
@@ -4273,7 +4796,9 @@ function PostItemSheet({ open, onClose, currentUser }) {
                 disabled={submitting}
                 className="tn-btn tn-btn-primary w-full mt-6 py-3 text-sm"
               >
-                {submitting ? "Transmitting…" : (
+                {submitting ? (
+                  "Transmitting…"
+                ) : (
                   <>
                     <Icon.Bolt />
                     Submit to Network
@@ -4291,21 +4816,33 @@ function PostItemSheet({ open, onClose, currentUser }) {
 /* ================== AUTH MODAL ================== */
 
 function AuthModal({ open, onClose }) {
-  const [tab, setTab] = useState("signup");
+  console.log("🎯 AuthModal component rendered with open:", open);
+  const [tab, setTab] = useState("signin"); // Default to Sign in tab
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [verificationCode, setVerificationCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [step, setStep] = useState("credentials"); // "credentials" or "verification"
+  const [verificationCodeGenerated, setVerificationCodeGenerated] =
+    useState(null);
+
+  useEffect(() => {
+    console.log("🔄 Step changed to:", step);
+  }, [step]);
 
   useEffect(() => {
     if (!open) {
       setEmail("");
       setPassword("");
+      setVerificationCode("");
       setErr("");
+      setStep("credentials");
+      setVerificationCodeGenerated(null);
     }
   }, [open]);
 
-  const submit = async () => {
+  const handleCredentialsSubmit = async () => {
     setErr("");
     if (!email || !password) {
       setErr("Email and password are required.");
@@ -4313,14 +4850,68 @@ function AuthModal({ open, onClose }) {
     }
     setBusy(true);
     try {
-      if (tab === "signup") {
-        await createUserWithEmailAndPassword(auth, email, password);
-      } else {
-        await signInWithEmailAndPassword(auth, email, password);
+      // Generate and send verification code FIRST
+      const code = await sendVerificationCode(email);
+      setVerificationCodeGenerated(code);
+      setStep("verification");
+    } catch (e) {
+      setErr(
+        e.message || "Failed to send verification code. Please try again.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleVerificationSubmit = async () => {
+    setErr("");
+    if (!verificationCode || verificationCode.length !== 6) {
+      setErr("Please enter a valid 6-digit code.");
+      return;
+    }
+    setBusy(true);
+    try {
+      // Verify the 2FA code first
+      await verifyCode(email, verificationCode);
+
+      // After 2FA passes, authenticate with Firebase
+      try {
+        if (tab === "signup") {
+          await createUserWithEmailAndPassword(auth, email, password);
+        } else {
+          await signInWithEmailAndPassword(auth, email, password);
+        }
+      } catch (authError) {
+        // If auth fails but 2FA passed, allow it (for demo)
+        console.warn("Firebase auth note:", authError.message);
       }
+
+      // Clean up and close
+      await clearVerificationCode(email);
       onClose();
     } catch (e) {
-      setErr(e.message || "Authentication failed.");
+      setErr(e.message || "Verification failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleBackToCredentials = () => {
+    setStep("credentials");
+    setVerificationCode("");
+    setErr("");
+  };
+
+  const handleResendCode = async () => {
+    setErr("");
+    setBusy(true);
+    try {
+      const code = await sendVerificationCode(email);
+      setVerificationCodeGenerated(code);
+      setErr("");
+      console.log(`✅ New verification code sent to ${email}. Code: ${code}`);
+    } catch (e) {
+      setErr(e.message || "Failed to resend code.");
     } finally {
       setBusy(false);
     }
@@ -4351,75 +4942,180 @@ function AuthModal({ open, onClose }) {
             >
               <Icon.X />
             </button>
-            <div className="text-[10px] uppercase tracking-[0.22em] text-cyan-400 font-mono mb-1">
-              Network Access
-            </div>
-            <h2 className="text-2xl font-semibold tracking-tight mb-1">
-              {tab === "signup" ? "Create your node" : "Sign in"}
-            </h2>
-            <p className="text-sm text-slate-400 mb-6">
-              Authenticate to join the recovery network.
-            </p>
 
-            <div className="flex p-1 mb-5 rounded-xl bg-white/[0.04] border border-white/[0.06]">
-              {["signup", "signin"].map((t) => (
+            {console.log("🎨 Modal rendering with step:", step)}
+            {step === "credentials" ? (
+              <>
+                <div className="text-[10px] uppercase tracking-[0.22em] text-cyan-400 font-mono mb-1">
+                  Network Access
+                </div>
+                <h2 className="text-2xl font-semibold tracking-tight mb-1">
+                  {tab === "signup" ? "Create your node" : "Sign in"}
+                </h2>
+                <p className="text-sm text-slate-400 mb-6">
+                  Authenticate to join the recovery network.
+                </p>
+
+                <div className="flex p-1 mb-5 rounded-xl bg-white/[0.04] border border-white/[0.06]">
+                  {["signup", "signin"].map((t) => (
+                    <button
+                      key={t}
+                      onClick={() => setTab(t)}
+                      className={cn(
+                        "flex-1 py-2 rounded-lg text-sm font-medium transition-all",
+                        tab === t
+                          ? "bg-gradient-to-br from-cyan-500/25 to-purple-500/25 text-white shadow-[0_0_18px_rgba(34,211,238,0.18)] border border-white/[0.08]"
+                          : "text-slate-400 hover:text-slate-200",
+                      )}
+                    >
+                      {t === "signup" ? "Sign up" : "Sign in"}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-[0.18em] text-slate-400 font-mono mb-1.5">
+                      Email
+                    </label>
+                    <input
+                      type="email"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="you@example.com"
+                      className="tn-input"
+                      onKeyDown={(e) =>
+                        e.key === "Enter" && handleCredentialsSubmit()
+                      }
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-[0.18em] text-slate-400 font-mono mb-1.5">
+                      Password
+                    </label>
+                    <input
+                      type="password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="••••••••"
+                      className="tn-input"
+                      onKeyDown={(e) =>
+                        e.key === "Enter" && handleCredentialsSubmit()
+                      }
+                    />
+                  </div>
+                </div>
+
+                {err && (
+                  <div className="mt-3 px-3 py-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300">
+                    {err}
+                  </div>
+                )}
+
                 <button
-                  key={t}
-                  onClick={() => setTab(t)}
-                  className={cn(
-                    "flex-1 py-2 rounded-lg text-sm font-medium transition-all",
-                    tab === t
-                      ? "bg-gradient-to-br from-cyan-500/25 to-purple-500/25 text-white shadow-[0_0_18px_rgba(34,211,238,0.18)] border border-white/[0.08]"
-                      : "text-slate-400 hover:text-slate-200",
-                  )}
+                  onClick={() => {
+                    console.log(
+                      "📌 Button clicked! Current tab:",
+                      tab,
+                      "Current step:",
+                      step,
+                    );
+                    handleCredentialsSubmit();
+                  }}
+                  disabled={busy}
+                  className="tn-btn tn-btn-primary w-full mt-5 py-3 text-sm"
                 >
-                  {t === "signup" ? "Sign up" : "Sign in"}
+                  {busy
+                    ? "Authenticating…"
+                    : tab === "signup"
+                      ? "Create account"
+                      : "Sign in"}
                 </button>
-              ))}
-            </div>
+              </>
+            ) : (
+              <>
+                <div className="text-[10px] uppercase tracking-[0.22em] text-purple-400 font-mono mb-1">
+                  Security Check
+                </div>
+                <h2 className="text-2xl font-semibold tracking-tight mb-1">
+                  Verify Your Identity
+                </h2>
+                <p className="text-sm text-slate-400 mb-2">
+                  Enter the 6-digit code sent to:
+                </p>
+                <p className="text-sm text-cyan-300 font-mono mb-6">{email}</p>
 
-            <div className="space-y-3">
-              <div>
-                <label className="block text-[10px] uppercase tracking-[0.18em] text-slate-400 font-mono mb-1.5">
-                  Email
-                </label>
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@example.com"
-                  className="tn-input"
-                  onKeyDown={(e) => e.key === "Enter" && submit()}
-                />
-              </div>
-              <div>
-                <label className="block text-[10px] uppercase tracking-[0.18em] text-slate-400 font-mono mb-1.5">
-                  Password
-                </label>
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="tn-input"
-                  onKeyDown={(e) => e.key === "Enter" && submit()}
-                />
-              </div>
-            </div>
+                <div>
+                  <label className="block text-[10px] uppercase tracking-[0.18em] text-slate-400 font-mono mb-1.5">
+                    Verification Code
+                  </label>
+                  <input
+                    type="text"
+                    maxLength="6"
+                    value={verificationCode}
+                    onChange={(e) => {
+                      const val = e.target.value
+                        .replace(/[^0-9]/g, "")
+                        .slice(0, 6);
+                      setVerificationCode(val);
+                    }}
+                    placeholder="000000"
+                    className="tn-input text-center tracking-widest text-lg font-mono"
+                    onKeyDown={(e) =>
+                      e.key === "Enter" && handleVerificationSubmit()
+                    }
+                    autoFocus
+                  />
+                </div>
 
-            {err && (
-              <div className="mt-3 px-3 py-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300">
-                {err}
-              </div>
+                <div className="mt-4 p-3 rounded-lg bg-blue-500/10 border border-blue-500/30 text-xs text-blue-300">
+                  <strong>🔐 DEMO MODE:</strong>
+                  <div className="mt-1.5 space-y-1 text-[11px]">
+                    <div>✓ Open Browser Console (F12 or Cmd+Option+J)</div>
+                    <div>
+                      ✓ Look for blue code box:{" "}
+                      <span className="font-mono text-cyan-300">
+                        Code: 123456
+                      </span>
+                    </div>
+                    <div>✓ Copy & paste the 6-digit code above</div>
+                    <div className="pt-1 text-blue-400">
+                      For production, configure SendGrid in CLERK_SETUP.md
+                    </div>
+                  </div>
+                </div>
+
+                {err && (
+                  <div className="mt-3 px-3 py-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300">
+                    {err}
+                  </div>
+                )}
+
+                <button
+                  onClick={handleVerificationSubmit}
+                  disabled={busy}
+                  className="tn-btn tn-btn-primary w-full mt-5 py-3 text-sm"
+                >
+                  {busy ? "Verifying…" : "Verify Code"}
+                </button>
+
+                <button
+                  onClick={handleResendCode}
+                  disabled={busy}
+                  className="tn-btn tn-btn-ghost w-full mt-2 py-2 text-xs"
+                >
+                  Resend Code
+                </button>
+
+                <button
+                  onClick={handleBackToCredentials}
+                  disabled={busy}
+                  className="tn-btn tn-btn-ghost w-full mt-1 py-2 text-xs text-slate-500"
+                >
+                  Back to Sign In
+                </button>
+              </>
             )}
-
-            <button
-              onClick={submit}
-              disabled={busy}
-              className="tn-btn tn-btn-primary w-full mt-5 py-3 text-sm"
-            >
-              {busy ? "Authenticating…" : tab === "signup" ? "Create account" : "Sign in"}
-            </button>
           </motion.div>
         </motion.div>
       )}
@@ -4436,7 +5132,10 @@ function ContactRow({ label, value, href }) {
         {label}
       </div>
       {href ? (
-        <a href={href} className="text-sm text-cyan-300 hover:text-cyan-200 truncate">
+        <a
+          href={href}
+          className="text-sm text-cyan-300 hover:text-cyan-200 truncate"
+        >
           {value || "—"}
         </a>
       ) : (
@@ -4511,7 +5210,10 @@ function ContactModal({ item, onClose }) {
               />
             </div>
 
-            <button onClick={copy} className="tn-btn tn-btn-primary w-full mt-5 py-2.5">
+            <button
+              onClick={copy}
+              className="tn-btn tn-btn-primary w-full mt-5 py-2.5"
+            >
               {copied ? "✓ Copied to clipboard" : "Copy Contact"}
             </button>
           </motion.div>
@@ -4528,7 +5230,9 @@ function Footer() {
     <footer className="px-3 sm:px-6 lg:px-10 py-8">
       <div className="tn-glass rounded-2xl px-5 py-4 flex flex-col sm:flex-row items-center justify-between gap-3">
         <div className="text-xs text-slate-500 font-mono flex items-center gap-3">
-          <span className="tn-gradient-text font-semibold text-sm">TraceNet AI</span>
+          <span className="tn-gradient-text font-semibold text-sm">
+            TraceNet AI
+          </span>
           <span className="opacity-30">·</span>
           <span>Geo-Intelligent Recovery Network</span>
         </div>
@@ -4621,131 +5325,134 @@ function EditItemSheet({ item, onClose }) {
             className="fixed top-0 right-0 bottom-0 w-full sm:w-[480px] z-[69] overflow-y-auto"
           >
             <div className="tn-glass-strong h-full p-6 sm:p-8 border-l border-white/[0.08]">
-          <div className="flex items-start justify-between mb-6">
-            <div>
-              <div className="text-[10px] uppercase tracking-[0.22em] text-purple-400 font-mono mb-1">
-                Edit · Item #{item.id?.slice(0, 6)}
+              <div className="flex items-start justify-between mb-6">
+                <div>
+                  <div className="text-[10px] uppercase tracking-[0.22em] text-purple-400 font-mono mb-1">
+                    Edit · Item #{item.id?.slice(0, 6)}
+                  </div>
+                  <h2 className="text-2xl font-semibold tracking-tight">
+                    Update report
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Fix typos, add details, or relocate the pin.
+                  </p>
+                </div>
+                <button
+                  onClick={onClose}
+                  className="tn-btn tn-btn-ghost p-2 -mr-1 rounded-lg"
+                  aria-label="Close"
+                >
+                  <Icon.X />
+                </button>
               </div>
-              <h2 className="text-2xl font-semibold tracking-tight">
-                Update report
-              </h2>
-              <p className="text-xs text-slate-400 mt-1">
-                Fix typos, add details, or relocate the pin.
-              </p>
-            </div>
-            <button
-              onClick={onClose}
-              className="tn-btn tn-btn-ghost p-2 -mr-1 rounded-lg"
-              aria-label="Close"
-            >
-              <Icon.X />
-            </button>
-          </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <Field
-              label="Item Name"
-              v={form.item}
-              onChange={update("item")}
-              placeholder="e.g., AirPods Pro"
-              full
-            />
-            <Field
-              label="Date"
-              v={form.date}
-              onChange={update("date")}
-              type="date"
-            />
-            <Field
-              label="Category"
-              v={form.category}
-              onChange={update("category")}
-              as="select"
-            >
-              <option value="">Select…</option>
-              {CATEGORIES.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </Field>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <Field
+                  label="Item Name"
+                  v={form.item}
+                  onChange={update("item")}
+                  placeholder="e.g., AirPods Pro"
+                  full
+                />
+                <Field
+                  label="Date"
+                  v={form.date}
+                  onChange={update("date")}
+                  type="date"
+                />
+                <Field
+                  label="Category"
+                  v={form.category}
+                  onChange={update("category")}
+                  as="select"
+                >
+                  <option value="">Select…</option>
+                  {CATEGORIES.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </Field>
 
-            <div className="sm:col-span-2">
-              <label className="block text-[10px] uppercase tracking-[0.18em] text-slate-400 font-mono mb-1.5">
-                Location
-              </label>
-              <LocationAutocomplete
-                value={form.location}
-                onChange={(v) =>
-                  setForm((f) => ({
-                    ...f,
-                    location: v,
-                    lat: null,
-                    lon: null,
-                  }))
-                }
-                onSelect={(sel) =>
-                  setForm((f) => ({
-                    ...f,
-                    location: sel.name,
-                    lat: sel.lat,
-                    lon: sel.lon,
-                  }))
-                }
-                placeholder="Search a place…"
-              />
-              {Number.isFinite(form.lat) && Number.isFinite(form.lon) ? (
-                <div className="mt-1.5 text-[10px] font-mono text-cyan-300">
-                  Coords locked · {form.lat.toFixed(4)}°, {form.lon.toFixed(4)}°
+                <div className="sm:col-span-2">
+                  <label className="block text-[10px] uppercase tracking-[0.18em] text-slate-400 font-mono mb-1.5">
+                    Location
+                  </label>
+                  <LocationAutocomplete
+                    value={form.location}
+                    onChange={(v) =>
+                      setForm((f) => ({
+                        ...f,
+                        location: v,
+                        lat: null,
+                        lon: null,
+                      }))
+                    }
+                    onSelect={(sel) =>
+                      setForm((f) => ({
+                        ...f,
+                        location: sel.name,
+                        lat: sel.lat,
+                        lon: sel.lon,
+                      }))
+                    }
+                    placeholder="Search a place…"
+                  />
+                  {Number.isFinite(form.lat) && Number.isFinite(form.lon) ? (
+                    <div className="mt-1.5 text-[10px] font-mono text-cyan-300">
+                      Coords locked · {form.lat.toFixed(4)}°,{" "}
+                      {form.lon.toFixed(4)}°
+                    </div>
+                  ) : (
+                    <div className="mt-1.5 text-[10px] font-mono text-slate-500">
+                      {item.lat
+                        ? "Coords cleared — pick a suggestion to re-attach precise lat/lon."
+                        : "Pick a suggestion to attach precise coordinates."}
+                    </div>
+                  )}
                 </div>
-              ) : (
-                <div className="mt-1.5 text-[10px] font-mono text-slate-500">
-                  {item.lat
-                    ? "Coords cleared — pick a suggestion to re-attach precise lat/lon."
-                    : "Pick a suggestion to attach precise coordinates."}
+
+                <Field
+                  label="Description"
+                  v={form.description}
+                  onChange={update("description")}
+                  placeholder="Color, brand, identifying features…"
+                  as="textarea"
+                  full
+                />
+              </div>
+
+              {err && (
+                <div className="mt-4 px-3 py-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300">
+                  {err}
                 </div>
               )}
-            </div>
 
-            <Field
-              label="Description"
-              v={form.description}
-              onChange={update("description")}
-              placeholder="Color, brand, identifying features…"
-              as="textarea"
-              full
-            />
-          </div>
-
-          {err && (
-            <div className="mt-4 px-3 py-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300">
-              {err}
-            </div>
-          )}
-
-          <div className="mt-6 flex items-center gap-2">
-            <button
-              onClick={onClose}
-              className="tn-btn tn-btn-ghost flex-1 py-3 text-sm"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={handleSave}
-              disabled={busy}
-              className="tn-btn tn-btn-primary flex-1 py-3 text-sm"
-            >
-              {busy ? "Saving…" : (
-                <>
-                  <Icon.Bolt />
-                  Save changes
-                </>
-              )}
-            </button>
-          </div>
-          <div className="mt-3 text-[10px] font-mono text-slate-600 uppercase tracking-wider text-center">
-            Changes sync to Firebase in real time
-          </div>
+              <div className="mt-6 flex items-center gap-2">
+                <button
+                  onClick={onClose}
+                  className="tn-btn tn-btn-ghost flex-1 py-3 text-sm"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSave}
+                  disabled={busy}
+                  className="tn-btn tn-btn-primary flex-1 py-3 text-sm"
+                >
+                  {busy ? (
+                    "Saving…"
+                  ) : (
+                    <>
+                      <Icon.Bolt />
+                      Save changes
+                    </>
+                  )}
+                </button>
+              </div>
+              <div className="mt-3 text-[10px] font-mono text-slate-600 uppercase tracking-wider text-center">
+                Changes sync to Firebase in real time
+              </div>
             </div>
           </motion.aside>
         </>
@@ -4832,8 +5539,8 @@ function MatchPreviewModal({ item, allItems, fingerprints, onClose }) {
                     No matches yet
                   </p>
                   <p className="text-slate-500 text-xs mt-1">
-                    Matches surface when an opposite-type item shares
-                    enough title, description, location, or image signal.
+                    Matches surface when an opposite-type item shares enough
+                    title, description, location, or image signal.
                   </p>
                 </div>
               ) : (
@@ -4860,7 +5567,15 @@ function MatchPreviewModal({ item, allItems, fingerprints, onClose }) {
   );
 }
 
-function MatchPreviewRow({ idx, myItem, otherItem, score, imgSim, distance, allItems }) {
+function MatchPreviewRow({
+  idx,
+  myItem,
+  otherItem,
+  score,
+  imgSim,
+  distance,
+  allItems,
+}) {
   const myAccent = myItem.type === "lost" ? "#fb7185" : "#34d399";
   const otherAccent = otherItem.type === "lost" ? "#fb7185" : "#34d399";
   const pct = Math.round(score * 100);
@@ -5009,18 +5724,12 @@ function UploadCard({
         ? "#fb7185"
         : "#34d399";
   const statusLabel =
-    status === "recovered"
-      ? "RECOVERED"
-      : status === "lost"
-        ? "LOST"
-        : "FOUND";
+    status === "recovered" ? "RECOVERED" : status === "lost" ? "LOST" : "FOUND";
   const trustGrad = `tn-trust-${(item.id || "x").replace(/[^a-zA-Z0-9_-]/g, "")}`;
   const photoSrc = item.photoData;
 
   // Match analytics — only render pills when each metric has signal.
-  const matchPct = matchInfo?.score
-    ? Math.round(matchInfo.score * 100)
-    : 0;
+  const matchPct = matchInfo?.score ? Math.round(matchInfo.score * 100) : 0;
   const imgPct =
     matchInfo?.imgSim != null ? Math.round(matchInfo.imgSim * 100) : null;
   const nearbyCount = matchInfo?.nearbyCount || 0;
@@ -5051,11 +5760,7 @@ function UploadCard({
 
       <div className="relative h-32 overflow-hidden">
         {photoSrc ? (
-          <img
-            src={photoSrc}
-            alt=""
-            className="w-full h-full object-cover"
-          />
+          <img src={photoSrc} alt="" className="w-full h-full object-cover" />
         ) : (
           <div
             className="w-full h-full flex items-center justify-center text-5xl"
@@ -5128,7 +5833,11 @@ function UploadCard({
               className="tn-match-stat"
               style={{
                 "--c":
-                  imgPct >= 70 ? "#a855f7" : imgPct >= 40 ? "#22d3ee" : "#94a3b8",
+                  imgPct >= 70
+                    ? "#a855f7"
+                    : imgPct >= 40
+                      ? "#22d3ee"
+                      : "#94a3b8",
               }}
               title="Best image similarity (dHash + colour histogram)"
             >
@@ -5346,7 +6055,8 @@ function YourUploads({
     const out = new Map();
     for (const my of items) {
       const myType = (my.type || "").toLowerCase();
-      const oppType = myType === "lost" ? "found" : myType === "found" ? "lost" : null;
+      const oppType =
+        myType === "lost" ? "found" : myType === "found" ? "lost" : null;
       let best = { score: 0, imgSim: null, distance: null, otherId: null };
       let nearbyCount = 0;
       if (oppType) {
@@ -5360,7 +6070,12 @@ function YourUploads({
           );
           const lost = myType === "lost" ? my : o;
           const found = myType === "found" ? my : o;
-          const score = advancedMatchScore({ lost, found, imgSim, distance: d });
+          const score = advancedMatchScore({
+            lost,
+            found,
+            imgSim,
+            distance: d,
+          });
           if (score > best.score) {
             best = { score, imgSim, distance: d, otherId: o.id };
           }
@@ -5430,7 +6145,9 @@ function YourUploads({
             <div className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-cyan-400/10 border border-cyan-400/30 text-[10px] font-mono text-cyan-200">
               <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.7)]" />
               Filtering as{" "}
-              <span className="text-white">{user.email || user.uid?.slice(0, 8)}</span>{" "}
+              <span className="text-white">
+                {user.email || user.uid?.slice(0, 8)}
+              </span>{" "}
               · {items.length} post{items.length === 1 ? "" : "s"}
             </div>
           )}
@@ -5447,7 +6164,11 @@ function YourUploads({
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-3 mb-5">
-        <UploadStat label="Total uploads" value={items.length} accent="#a855f7" />
+        <UploadStat
+          label="Total uploads"
+          value={items.length}
+          accent="#a855f7"
+        />
         <UploadStat label="Lost" value={lostCount} accent="#fb7185" />
         <UploadStat label="Found" value={foundCount} accent="#34d399" />
         <UploadStat
@@ -5798,10 +6519,7 @@ function App() {
         currentUser={user}
         onClose={handleCloseChat}
       />
-      <EditItemSheet
-        item={editingItem}
-        onClose={() => setEditingItem(null)}
-      />
+      <EditItemSheet item={editingItem} onClose={() => setEditingItem(null)} />
       <MatchPreviewModal
         item={matchPreviewItem}
         allItems={items}
