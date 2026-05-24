@@ -42,9 +42,6 @@ import {
   onAuthStateChanged,
 } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
 
-// Import EmailJS for sending emails
-import emailjs from "https://cdn.jsdelivr.net/npm/@emailjs/browser@4.4.1/dist/index.global.min.js";
-
 /* ================== FIREBASE INIT ================== */
 
 const firebaseConfig = {
