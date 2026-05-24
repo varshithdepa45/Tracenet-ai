@@ -515,3 +515,4 @@ Built with:
 **Questions?** Open an issue on GitHub!
 
 **Enjoy your Lost & Found platform!** 📍✨
+Rebuild trigger
