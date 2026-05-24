@@ -4850,14 +4850,14 @@ function AuthModal({ open, onClose }) {
     }
     setBusy(true);
     try {
-      // For now, just show verification screen directly (skip email)
-      // In production, this would send email via EmailJS
-      const code = "123456"; // Demo code for testing
-      setVerificationCodeGenerated(code);
+      // Send verification code via EmailJS
+      await sendVerificationCode(email);
       setStep("verification");
-      console.log("✅ Demo: Showing verification screen. Test code: 123456");
+      console.log("✅ Verification code sent to", email);
     } catch (e) {
-      setErr(e.message || "Failed to proceed. Please try again.");
+      setErr(
+        e.message || "Failed to send verification code. Please try again.",
+      );
     } finally {
       setBusy(false);
     }
